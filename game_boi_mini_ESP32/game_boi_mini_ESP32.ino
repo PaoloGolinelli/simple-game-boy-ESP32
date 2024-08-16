@@ -37,9 +37,9 @@ const char *difficult[3] = {
   " Hard " };
 
 // global variables
-const int     A1            = 2;      // IO02 - analog signal x joystick
-const int     A2            = 4;      // IO04 - analog signal y joystick
-const int     switchPin     = 16;     // IO16
+const int     A1            = 26;     // IO26 - analog signal x joystick
+const int     A2            = 35;     // IO35 - analog signal y joystick
+const int     switchPin     = 18;     // IO18
 int           nrGames       = 4;
 int           gameRate;               // time in ms between moves
 double        d_to_r        = 3.14/180.0;

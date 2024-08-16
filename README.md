@@ -5,7 +5,8 @@ In this repository you can find all the material required to build a DIY console
 - code for ESP32
 - schematic diagram of the circuit on breadboard
     https://app.cirkitdesigner.com/project/0857a7c8-4681-452b-a24f-5374fa44a8b1
-- schematic diagram of the circuit to weld on matrix board
+- schematic diagram of the circuit to weld on matrix board ("PCB")
+    https://app.cirkitdesigner.com/project/fdfa9b3a-22b1-4d85-bbf5-8aa331098814
 - stl file for 3D printing the case
 
 ## Components required to make your own
