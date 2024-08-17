@@ -22,6 +22,8 @@ In this repository you can find all the material required to build a DIY console
 - 9V battery
 - step down voltage regulator: DD4012SA 5V
 
+### Instructions on 
+
 ## Required tools
 - filament 3D printer
 - welder
