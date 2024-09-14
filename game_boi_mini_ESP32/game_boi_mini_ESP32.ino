@@ -1,48 +1,85 @@
+// ---------------------------------------------------------------------------------------------------
+#define   MULTIPLAY       true  // set to true to allow for multiplayer games, otherwise set to false
+// ---------------------------------------------------------------------------------------------------
+
 #include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <cmath>
+#include <String.h>
+
+#if (MULTIPLAY) // ------------------------- MULTIPLAYER
+#include "BluetoothSerial.h"
+#include "esp_bt_device.h"
+#include <esp_mac.h>
+#endif // ----------------------------------------------
+
+// Macro functions
+#define SIGN(x) ((x) > 0 ? 1 : ((x) < 0 ? -1 : 0))
 
 // Game parameters
 #define   SCREEN_WIDTH    128   // OLED display width, in pixels
 #define   SCREEN_HEIGHT   64    // OLED display height, in pixels
 #define   SNAKE_WIDTH     6     // Snake display width, in pixels
 #define   SNAKE_HEIGHT    6     // Snake display height, in pixels
+#define   POOL_FORCE_COEF 5.6   // Multiplier of force to calc pool initial velocity 
 const int t_menu =        700;  // if pressed for this amount of ms returns to menu
 const int t_sample_menu = 200;  // ms each sample is made in the menu selection
 const int t_bounce =      40;   // time in ms to account for switch bouncing
 #define   ANALOG_RES      4095  // Resolution of ADC
+#define   d_to_r          3.14/180.0
 
-// Declaration for an SSD1306 display connected to I2C (SDA: GPIO21, SCL: GPIO22)
+
+// Declaration for an SSD1306 display connected to I2C (default pins are SDA: GPIO21, SCL: GPIO22)
 #define          OLED_RESET    -1    // Reset pin # (or -1 if sharing Arduino reset pin)
 Adafruit_SSD1306 display (SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// structs
+// define a struct to handle coordinates (double x,y, and direction)
 struct crd {  // coordinate
   double x;
   double y;
   int    d;   // snakes heading direction for each coordinate
 };
 
-const char *options[4] = { 
-  " Snake ", 
-  " Pool ", 
-  " Hit the target ",
-  " Calibration "};
+#if (MULTIPLAY) // ------------------------- MULTIPLAYER
+  #define NRGAMES 5   // number of games
+  const char *options[NRGAMES] = { 
+    " Snake ", 
+    " Pool ", 
+    " Hit the target ",
+    " Pong multiplayer ",
+    " Calibration "};
+#else // --------------------------------- SINGLE PLAYER
+  #define NRGAMES 4   // number of games
+  const char *options[NRGAMES] = { 
+    " Snake ", 
+    " Pool ", 
+    " Hit the target ",
+    " Calibration "};
+#endif // ----------------------------------------------
 
 const char *difficult[3] = {
   " Easy ",
   " Medium ",
   " Hard " };
 
+// Input Pin Wemos
+  const int     AI1            = 35;      // IO26 - analog signal x joystick
+  const int     AI2            = 26;      // IO18 - analog signal y joystick
+  const int     switchPin      = 19;      // IO19
+/*   const int     SCLpin         = 22;      // IO18
+  const int     SDApin         = 21;      // IO18 */
+
+// Input Pin S3 mini
+  // const int     AI1           = 6;       // GP6 - analog signal x joystick
+  // const int     AI2           = 5;       // GP5 - analog signal y joystick
+  // const int     switchPin     = 4;       // GP4
+  // const int     SCLpin        = 1;       // GP1
+  // const int     SDApin        = 2;       // GP2
+
 // global variables
-const int     A1            = 35;     // IO35 - analog signal x joystick
-const int     A2            = 26;     // IO26 - analog signal y joystick
-const int     switchPin     = 18;     // IO18
-int           nrGames       = 4;
 int           gameRate;               // time in ms between moves
-double        d_to_r        = 3.14/180.0;
 unsigned long t, t_press, t_release;
 
 // snake variables
@@ -54,22 +91,51 @@ int   nr_width        = SCREEN_WIDTH/SNAKE_WIDTH;
 int   nr_height       = SCREEN_HEIGHT/SNAKE_HEIGHT;
 
 // pool variables
-crd     balls[4];   // initial position to be set at beginning of game
-crd     b_vel[4];   // define the carthesian velocity of the balls
-crd     stick[3];   // defines the position of the stick
-bool    bhole[4];   // true if they end up in a hole
-double  stick_angle, stick_F;
-double  hole_R   = 7;
-double  ball_R   = 4;
-double  stick_L  = 18;
+crd          balls[4];          // initial position to be set at beginning of game
+crd          b_vel[4];          // define the carthesian velocity of the balls
+crd          stick[3];          // defines the position of the stick
+bool         bhole[4];          // true if they end up in a hole
+double       stick_angle, stick_F;
+const double hole_R   = 7;
+const double ball_R   = 4;
+const double stick_L  = 18;
 const double dt       = 0.03;   // integration time in seconds
 const double fr_coeff = 0.4;    // friction coefficient
 
 // hit the target variables
-int     d_range   = 8;
-double  dist, dist_tot;
+int           d_range = 8;
+double        dist, dist_tot;
 unsigned long t_tot;
-double  score;
+double        score;
+
+#if (MULTIPLAY) // ----------- MULTIPLAYER -------------------------
+  // BlueTooth variable
+  BluetoothSerial SerialBT; 
+  uint8_t slaveMACAddress[6] = {0x32, 0xAE, 0xA4, 0x07, 0x0D, 0x66}; // slave MAC address
+  uint8_t oldMACAddress[6];
+
+  // pong variables
+  #define     XV        80      // ball's horizontal velocity
+  #define     MAX_XV    110     // ball's max horizontal velocity
+  double      max_t_v = 0.06;   // max pixels a tile can move per millisecond
+  const int   tile_H  = 10;     // nr of pixels defining the tile height
+  const int   tile_W  = 3;      // nr of pixels defining the tile width
+  const int   bord_W  = 3;      // border width
+  const int   v_bound = 10;     // pixel above field (for displaying score)
+  const int   bR      = 2;      // ball radius
+  crd         ball_xy;          // ball coordinates
+  crd         ball_v;           // ball velocities
+  double      t_y1, t_y2;       // y coordinates of the two tiles
+  crd         pr_ball_xy;       // previous ball coordinates
+  double      pr_y1, pr_y2;     // previous y coordinates of the two tiles
+  double      Dt_y1;            // receiver tile difference with previous y coord
+  bool        scored;           // turned to true when it needs to update the score
+  bool        is_master;        // set to T when gaimboi is master in BT communication     
+  bool        play_receive;     // set to T when the current device is receiving the ball
+  int         score_1, score_2; // score of the two players
+
+#endif // ----------------------------------------------------------
+
 
 // joystick variables
 double  xa = 238, xd = 4.30, xe = -10.89;  // parabola parameters
@@ -85,6 +151,7 @@ int     entered  = -1;
 
 // Task handles for parallel programming
 TaskHandle_t handle_snake_joy_read;
+//TaskHandle_t handle_pong_joy_read;
 
 // functions
 void starting_animation ();
@@ -108,6 +175,12 @@ void pool_game          ();
 
 void target_game        ();
 
+#if (MULTIPLAY) // -------------- MULTIPLAYER GAMES ----------
+void pong_game          ();
+  bool initialize_BT    ();                 // starts BT in master/slave mode and pair the devices
+  void pong_printfield  ();                 // prints the two tiles, the ball and the score 
+#endif // ----------------------------------------------------
+
 
 void setup() {
   Serial.begin(115200);
@@ -118,6 +191,8 @@ void setup() {
   t_release = millis();
   t_press   = millis();
 
+  //Wire.begin(SCLpin, SDApin); // define the pins for I2C (SCL,SDA)
+
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3D for 128x64
     Serial.println(F("SSD1306 allocation failed"));
@@ -125,7 +200,7 @@ void setup() {
   }
 
   // starting animation "GAIM BOY"
-  starting_animation ();
+  starting_animation();
 
   delay(100);
   display.clearDisplay();
@@ -156,9 +231,19 @@ void loop() {
   else if (selected == 2) {
     target_game();
   }
+
+#if (MULTIPLAY) // ----------- MULTIPLAYER ---------
+  else if (selected == 3) {
+    pong_game();
+  }
+  else if (selected == 4) {
+    calibrate();
+  }
+#else // -------------------- SINGLE PLAYER --------
   else if (selected == 3) {
     calibrate();
   }
+#endif // ------------------------------------------
 
   delay(100);
 }
@@ -294,7 +379,7 @@ void menu () {
       selected++;
     }
 
-    selected = (selected + nrGames) % nrGames;
+    selected = (selected + NRGAMES) % NRGAMES;
 
     if (mnpress) {
       break;
@@ -307,7 +392,7 @@ void menu () {
       display.println(F("Games"));
       display.println("");
 
-      for(int i=0; i < nrGames; i++) {
+      for(int i=0; i < NRGAMES; i++) {
         if (i == selected) {
           display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
           display.println(options[i]);
@@ -326,16 +411,17 @@ void menu () {
 /*---------------------
   |       SNAKE       |
   --------------------- */
-
 // function called on secondary core to run in parallel with snake main loop
 // it reads the joistick inputs so that the other core can  
 void snake_joy_read(void *parameter) {  
   while (true) {
-    // Read the joystick and calculate the 
+    vTaskDelay(1);  // Short delay to yield control
+  
+    // Read the joystick and calculate the direction
     readJoystick();
+
     calculate_dir();
 
-    vTaskDelay(3);  // Short delay to yield control
     if (!alive) {
       break;
     }
@@ -345,7 +431,6 @@ void snake_joy_read(void *parameter) {
 }
 
 void snake_game() {
-
   while(!sw_press)
     delay(1);
   
@@ -369,7 +454,7 @@ void snake_game() {
     }
     else {
       display.clearDisplay();
-      display.setTextSize(1.5);             
+      display.setTextSize(1);             
       display.setTextColor(SSD1306_WHITE);
       display.setCursor(0,0);
       display.println(F("Select difficulty"));
@@ -427,8 +512,6 @@ void snake_game() {
   while (alive) {
     t = millis();
   
-    readJoystick();
-
     if (dir == 0)
       dir = precDir;
 
@@ -442,14 +525,10 @@ void snake_game() {
     
     printFrame();
     
-    readJoystick();
-
     eat(false);  // false because it's not the first call
         
-    while (millis() - t < gameRate) {
-      readJoystick();
+    while (millis() - t < gameRate)
       delay(1);
-    }
   }
 
   display.clearDisplay();
@@ -603,7 +682,7 @@ void printFrame() {
   --------------------- */
 void pool_game() {
 
-  while(!sw_press)
+  while (!sw_press)
     delay(1);
 
   // draw pool table
@@ -626,7 +705,7 @@ void pool_game() {
   display.display();
   alive = true;
 
-  while(sw_press)
+  while (sw_press)
     delay(1);
 
   // initialize coordinates
@@ -645,8 +724,8 @@ void pool_game() {
   while (alive) {
     pool_aim ();
 
-    b_vel[0].x =  5.0 * stick_F * cos(stick_angle*d_to_r);
-    b_vel[0].y = -5.0 * stick_F * sin(stick_angle*d_to_r);
+    b_vel[0].x =  POOL_FORCE_COEF * stick_F * cos(stick_angle*d_to_r);
+    b_vel[0].y = -POOL_FORCE_COEF * stick_F * sin(stick_angle*d_to_r);
 
     pool_printfield();
     pool_balls_anim();
@@ -936,7 +1015,8 @@ void target_game() {
         Serial.print("clicked at dist: "); Serial.println(dist);
 
         // save total distance for accuracy measure
-        dist_tot += dist;
+        if (dist > 2)
+          dist_tot += dist;
 
         if (dist <= d_range) {
           // define new coordinate
@@ -950,8 +1030,8 @@ void target_game() {
       readJoystick(); 
 
       // this would be using polar cordinates but it's not very precise
-      //position[0].x += magn * cos(theta);
-      //position[0].y += magn * sin(theta);
+      // position[0].x += magn * cos(theta);
+      // position[0].y += magn * sin(theta);
 
       // move to new position integrating the 2 distances
       if      (Xlin > 0.15 && Xlin <= 0.5)
@@ -1001,12 +1081,12 @@ void target_game() {
   t_tot = (millis() - t_tot)/1000;
 
   // calculate accuracy as the ratio between maximum in-range distance (as if every hit was at the bound of the target) and actual total distance
-  dist = 1-dist_tot/(20*d_range);
+  dist = 1-dist_tot/(20.0*d_range);
 
   if (t_tot < 39)
-    score = 100*abs(dist) * (40-t_tot);
+    score = 100.0*abs(dist) * (40.0-t_tot);
   else
-    score = 50*abs(dist);
+    score = 50.0*abs(dist);
 
   Serial.println(dist_tot);
   Serial.println(dist);
@@ -1027,6 +1107,379 @@ void target_game() {
   while(sw_press)
     delay(1);
 }
+
+#if (MULTIPLAY) // --------------- MULTIPLAYER GAMES ---------------
+
+/*---------------------
+  |       PONG        |
+  --------------------- */
+void pong_game() {
+  // print game name
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(1);
+  display.setCursor(38, 8); display.println("PONG");
+  display.display();
+
+  // delay some time 
+  delay(500);
+
+  // select between master and slave
+  selected  = 1;
+  mnpress   = false;
+  display.setTextSize(1);
+  display.setCursor(8, 30); display.println(F("Bluetooth pairing"));
+  while (true) {
+    readJoystick();
+    calculate_dir();
+
+    if (dir == 1)
+      selected--;
+    else if (dir == 3)
+      selected++;
+
+    selected = (selected + 2) % 2;
+
+    if (mnpress) {
+      if (selected == 1) 
+        is_master = true;
+      else
+        is_master = false;
+
+      break;
+    }
+    else {
+      display.setCursor(0, 40); 
+
+      if (selected == 1) {
+        display.setTextColor(SSD1306_WHITE); display.print(" ");
+        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+        display.println(" Master ");
+        display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+        display.print("  Slave  ");
+      }
+      else {
+        display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+        display.println("  Master ");
+        display.print(" ");
+        display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+        display.print(" Slave  ");
+      }
+    }
+
+    display.display();
+    delay(t_sample_menu);
+  }
+  display.setTextColor(SSD1306_WHITE);
+
+  // pair bluetooths
+  if(initialize_BT()) {       // succesfull pairing
+    display.clearDisplay();
+    display.setCursor(14, 10); display.println(F("Bluetooth paired"));
+    display.setCursor(14, 18); display.println(F("  succesfully"));
+    display.display();
+
+    delay(2000);
+    
+    alive = true;
+  } else {                    // could not initiate bluetooth communication
+    SerialBT.disconnect();  
+
+    display.clearDisplay();
+    display.setCursor(10, 25); display.println(F(" Failed to connect"));
+    display.setCursor(10, 38); display.println(F("press to go to menu"));
+    display.display();
+
+    while (sw_press) 
+      delay(1);
+
+    alive = false;
+    gotomenu = true;
+  }
+
+  // Game initialization
+  double frRate = 30;          // milliseconds per frame
+  score_1 = 0; score_2 = 0;  
+  scored = true;
+
+  // initial tile position
+  t_y1 = (SCREEN_HEIGHT+v_bound)/2.0;
+  t_y2 = (SCREEN_HEIGHT+v_bound)/2.0;
+  pr_y1 = t_y1;
+  pr_y2 = t_y2;
+
+  SerialBT.println(t_y1);       // sends tile position
+
+  // initial ball position
+  ball_xy.x = SCREEN_WIDTH/2;
+  ball_xy.y = (SCREEN_HEIGHT+v_bound)/2;
+  pr_ball_xy.x = ball_xy.x; 
+  pr_ball_xy.y = ball_xy.y;
+
+  // initial ball velocity
+  ball_v.y = random(-XV, XV);   // y v is calculated randomicly
+  if (is_master) {
+    play_receive = true;        // master starts
+    ball_v.x = -XV;             // initial ball velocity
+  } else {
+    play_receive = false;
+    ball_v.x =  XV;             // initial ball velocity
+  }
+
+  display.clearDisplay();
+  display.drawFastHLine(0, v_bound, SCREEN_WIDTH, 1);
+  display.drawFastHLine(0, SCREEN_HEIGHT-1, SCREEN_WIDTH, 1);
+  display.drawFastVLine(0, v_bound, SCREEN_HEIGHT-v_bound, 1);
+  display.drawFastVLine(SCREEN_WIDTH-1, v_bound, SCREEN_HEIGHT-v_bound, 1);
+  pong_printfield();
+
+  Serial.printf("\n\n--------------------------------\n--------------------------------\n\n", t_y2);  // DEBUG
+
+  // Game loop
+  while (alive) {
+    t = millis();
+
+    // BT communication: only the tile position is communicated. Every device calculates the game by itself      
+    // syncronization is essential
+    while (alive) {                         // waits until opponents tile position is received via BT
+      delayMicroseconds(100);
+      Serial.print("-");
+      if (SerialBT.available())
+        break;
+    }
+    Serial.print("BT\n");
+
+    pr_y2 = t_y2;                           // saves previous tile position
+    t_y2 = (SerialBT.readStringUntil(' ')).toFloat();
+
+    // read analog input
+    Yval = analogRead(AI2);                 // read the y axis of the joystick
+    Ylin = sqrt(Yval/ya - ye) - yd;         // and linearize it
+
+    Dt_y1 = t_y1 - pr_y1;                   // stores in a variable the previous tile difference
+    pr_y1 = t_y1;                           // saves previous tile position
+
+    if (fabs(Ylin) > 0.04) {                // noise cancellation
+      Ylin = SIGN(Ylin)*pow(fabs(Ylin), 1.0/3.0); // increase sensibility for lower values
+      t_y1 += max_t_v*frRate*Ylin;          // increment the tile position
+    }
+
+    if (t_y1 < v_bound + tile_H/2 + 1)      // check if the tile is not over the border
+      t_y1 = v_bound + tile_H/2 + 1;
+    else if (t_y1 > SCREEN_HEIGHT - tile_H/2 - 2)
+      t_y1 = SCREEN_HEIGHT - tile_H/2 - 2;
+    
+    SerialBT.printf("%f ", t_y1);           // sends tile position giving a lot of time to the message to be sent
+
+    pr_ball_xy.x = ball_xy.x;               // saves the current ball position 
+    pr_ball_xy.y = ball_xy.y;
+
+    ball_xy.x += ball_v.x*frRate/1000.0;    // calculates the new ball position
+    ball_xy.y += ball_v.y*frRate/1000.0;
+
+    // check if it hits the border
+    if (ball_xy.y < v_bound + bR + 1) { 
+      ball_xy.y += 2.0*(v_bound + bR + 1 - ball_xy.y);
+      ball_v.y *= -1;
+    }
+    else if (ball_xy.y > SCREEN_HEIGHT - bR - 1) {
+      ball_xy.y -= 2.0*(ball_xy.y - (SCREEN_HEIGHT - bR - 1));
+      ball_v.y *= -1;
+    }
+
+    // check if it hit the tile or if it scored
+    if (ball_xy.x <= bord_W + tile_W) {                   // I am receiving the ball
+      if (fabs(pr_y1-ball_xy.y) < tile_H/2 + 1) {         // bounce
+        ball_xy.x += 2.0*(bord_W + tile_W - ball_xy.x) ;  // sets it to exact bouncing position
+        ball_v.x *= -1.0;
+
+        // calculate new vertical velocity
+        ball_v.y += Dt_y1*150.0/frRate;
+
+        if (fabs(ball_v.y) > MAX_XV) {
+          ball_v.y = ball_v.y > 0 ? MAX_XV : -MAX_XV; 
+        }
+      }
+      else {  // opponent scored
+        scored = true;
+        play_receive = false;
+        score_2++;
+      }
+    }
+    else if ((SCREEN_WIDTH - ball_xy.x) <= bord_W + tile_W) { // opponent is receiving the ball
+      if (fabs(t_y2-ball_xy.y) < tile_H/2 + 1) {              // bounce
+        ball_xy.x -= 2.0*(ball_xy.x - (SCREEN_WIDTH - bord_W - tile_W)) ;  // sets it to exact bouncing position
+        ball_v.x *= -1.0;
+
+        // calculate new vertical velocity
+        ball_v.y += (t_y2-pr_y2)*150.0/frRate;
+
+        if (fabs(ball_v.y) > MAX_XV) {
+          ball_v.y = ball_v.y > 0 ? MAX_XV : -MAX_XV; 
+        }
+      }
+      else {  // I scored
+        scored = true;
+        play_receive = true;
+        score_1++;
+      }
+    }
+    
+    pong_printfield();  // print field
+
+    if (scored) {
+      if (score_1 > 9 || score_2 > 9) { // check if game ended
+        alive     = false;
+        gotomenu  = true;
+
+        display.setTextSize(2);     
+        display.setTextColor(SSD1306_WHITE);
+        display.fillRect(SCREEN_WIDTH/2-41, SCREEN_HEIGHT/2-6, 70, 18, 0);
+
+        if (score_1 > 9) {
+          display.setCursor(SCREEN_WIDTH/2-40, SCREEN_HEIGHT/2-5); display.println("YOU WIN");
+        } else {
+          display.setCursor(SCREEN_WIDTH/2-44, SCREEN_HEIGHT/2-5); display.println("YOU LOST");
+        }
+
+        display.display();
+
+        while(sw_press)
+          delay(1);
+      }
+      else { // game is still on: starts back towards who scored
+        pr_ball_xy.x = ball_xy.x;               // saves the current ball position 
+        pr_ball_xy.y = ball_xy.y;
+        ball_xy.x = SCREEN_WIDTH/2;
+        ball_xy.y = (SCREEN_HEIGHT+v_bound)/2;
+        pr_y1 = t_y1;
+        pr_y2 = t_y2;
+        t_y1 = (SCREEN_HEIGHT+v_bound)/2.0;
+        t_y2 = (SCREEN_HEIGHT+v_bound)/2.0;
+
+        delay(1000);
+
+        pong_printfield();
+
+        if (play_receive) {
+          ball_v.x = -XV;             // initial ball velocity
+        } else {
+          ball_v.x =  XV;
+        }
+        
+        ball_v.y = random(-XV, XV);   // y v is calculated randomicly
+
+        scored = false;
+      }
+    }
+
+    while (millis() - t < frRate) {
+      delay(1);
+      Serial.print("-"); // DEBUG
+    }
+    Serial.println("done"); // DEBUG
+  }
+
+  // at the moment I have no better alternative to reset the BT comm than to restart the devices
+  // I should fix this but only if I continue to use BT classic. But I think I will be using BLE because
+  // it is the only one supported for ESP32 S3 mini, which I want to use for its very compact form
+  SerialBT.end();
+  ESP.restart();
+  return;
+}
+
+bool initialize_BT() {
+  bool success_pairing = false;
+  int new_seed;
+  display.clearDisplay();
+  display.setCursor(12, 10); display.println(F("Bluetooth pairing"));
+
+  if (is_master) {
+    // Start Bluetooth in master mode
+    SerialBT.begin("ESP32_Master", true);  // true enables master mode
+    SerialBT.deleteAllBondedDevices();
+
+    display.setCursor(14, 35); display.println(F("Press when slave")); 
+    display.setCursor(14, 43); display.println(F("is ready to pair")); 
+    display.display();
+
+    while (sw_press)
+      delay(1);
+    
+    if (SerialBT.connect(slaveMACAddress)) {  // connect to the server
+      Serial.println("Connected to Server!");
+      success_pairing = true;
+
+      new_seed = random(1000);
+      SerialBT.println(new_seed);             // send new seed to slave, the game can start
+      randomSeed(new_seed);
+
+      delay(1200);
+    } else {
+      Serial.println("Failed to connect to Server.");
+      success_pairing = false;
+    }
+  }
+  else {  
+    slaveMACAddress[5] -= 2;
+    esp_base_mac_addr_set(&slaveMACAddress[0]);
+    slaveMACAddress[5] += 2;
+
+    display.setCursor(24, 39); display.println(F("Ready to pair")); 
+    display.display();
+
+    SerialBT.begin("ESP32_Slave", false);  // start bluetooth in slave mode
+    Serial.println("Bluetooth Server Started. Waiting for clients...");
+
+    alive = true;
+    while (alive) {
+      if (SerialBT.available()) {
+        delay(200);
+        new_seed = (SerialBT.readString()).toInt();
+        Serial.printf("new seed is %i", new_seed);
+        randomSeed(new_seed);
+        success_pairing = true;
+
+        break;
+      }
+      delay(1);
+    }
+  }
+
+  return success_pairing;
+}
+
+void pong_printfield() {
+  // draw score if scored
+  if (scored) {
+    display.setTextSize(1);     
+    display.fillRect(50, 1, 32, 8, 0);  // deletes previous score
+    if (score_1 >= 10)
+      display.setCursor(44, 1); 
+    else
+      display.setCursor(50, 1); 
+    display.print(score_1); display.print(" : "); display.print(score_2);
+  }
+
+  // delete previous tiles and ball by drawing with black on the previous positions
+  display.fillCircle(pr_ball_xy.x, pr_ball_xy.y, bR, 0);
+  display.fillRect(bord_W, pr_y1-tile_H/2, tile_W, tile_H, 0);
+  display.fillRect(SCREEN_WIDTH-tile_W-bord_W, pr_y2-tile_H/2, tile_W, tile_H, 0);
+
+  // draw new tiles and ball positions
+  display.fillCircle(ball_xy.x, ball_xy.y, bR, 1);
+  display.fillRect(bord_W, t_y1-tile_H/2, tile_W, tile_H, 1);
+  display.fillRect(SCREEN_WIDTH-tile_W-bord_W, t_y2-tile_H/2, tile_W, tile_H, 1);
+
+  // draw dotted line
+  #define DV 4
+  for (int l = 0; v_bound+2*l*DV < 64; l++)
+    display.drawFastVLine(SCREEN_WIDTH/2, v_bound+2*l*DV, DV, 1);
+
+  display.display();
+}
+
+#endif // ----------------------------------------------------------
 
 
 /*-----------------------
@@ -1063,12 +1516,12 @@ void calibrate() {
   display.setCursor(10,38); display.print(F("  in the middle   ")); 
   display.display();
 
-  while (abs(analogRead(A1) - 2048) > 500 || abs(analogRead(A2) - 2048) > 500)
+  while (abs(analogRead(AI1) - 2048) > 500 || abs(analogRead(AI2) - 2048) > 500)
     delay(10);
 
   delay(1500);
-  x2 = analogRead(A1);
-  y2 = analogRead(A2);
+  x2 = analogRead(AI1);
+  y2 = analogRead(AI2);
 
   Serial.print("x2 = "); Serial.print(x2); Serial.print(" y2 = "); Serial.println(y2);
 
@@ -1080,12 +1533,12 @@ void calibrate() {
   display.drawLine(SCREEN_WIDTH-10, 10, SCREEN_WIDTH-21, 7, 1);
   display.display();
 
-  while (analogRead(A1) > 500 || analogRead(A2) > 500)
+  while (analogRead(AI1) > 500 || analogRead(AI2) > 500)
     delay(10);
 
   delay(1000);
-  x1 = analogRead(A1);
-  y1 = analogRead(A2);
+  x1 = analogRead(AI1);
+  y1 = analogRead(AI2);
 
   Serial.print("x1 = "); Serial.print(x1); Serial.print(" y1 = "); Serial.println(y1);
 
@@ -1097,12 +1550,12 @@ void calibrate() {
   display.drawLine(10, SCREEN_HEIGHT-10, 21, SCREEN_HEIGHT-7, 1);
   display.display();
 
-  while (analogRead(A1) < 3600 || analogRead(A2) < 3600)
+  while (analogRead(AI1) < 3600 || analogRead(AI2) < 3600)
     delay(10);
 
   delay(1000);
-  x3 = analogRead(A1);
-  y3 = analogRead(A2);
+  x3 = analogRead(AI1);
+  y3 = analogRead(AI2);
 
   Serial.print("x3 = "); Serial.print(x3); Serial.print(" y3 = "); Serial.println(y3);
 
@@ -1140,8 +1593,8 @@ void calibrate() {
 
 void readJoystick() {   // read joystick values
 
-  double Xval = analogRead(A1);
-  double Yval = analogRead(A2);
+  double Xval = analogRead(AI1);
+  double Yval = analogRead(AI2);
 
   Xlin = sqrt(Xval/xa - xe) - xd;
   Ylin = sqrt(Yval/ya - ye) - yd;
