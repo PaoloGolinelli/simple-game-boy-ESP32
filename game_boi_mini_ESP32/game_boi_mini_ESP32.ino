@@ -1,6 +1,8 @@
-// ---------------------------------------------------------------------------------------------------
-#define   MULTIPLAY       true  // set to true to allow for multiplayer games, otherwise set to false
-// ---------------------------------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------------------------
+#define   MULTIPLAY       true    // set to true to allow for multiplayer games, otherwise set to false
+#define   BT_CLASSIC      false   // set to true to use BT classic, false to use Bluetooth Low Energy 
+#define   ESP32_MOD       false   // set to true if you want to use a ESP32 wroom, false to use a s3 mini 
+// -------------------------------------------------------------------------------------------------------
 
 #include <SPI.h>
 #include <Wire.h>
@@ -10,13 +12,20 @@
 #include <String.h>
 
 #if (MULTIPLAY) // ------------------------- MULTIPLAYER
-#include "BluetoothSerial.h"
-#include "esp_bt_device.h"
-#include <esp_mac.h>
+  #if (BT_CLASSIC)
+    #include "BluetoothSerial.h"
+    #include "esp_bt_device.h"
+    #include <esp_mac.h>
+  #else
+    #include <BLEDevice.h>
+    #include <BLEServer.h>
+  #endif
 #endif // ----------------------------------------------
 
 // Macro functions
 #define SIGN(x) ((x) > 0 ? 1 : ((x) < 0 ? -1 : 0))
+#define ROUND_TO_1_DECIMALS(x) (int(x*10.0) / 10.0)
+
 
 // Game parameters
 #define   SCREEN_WIDTH    128   // OLED display width, in pixels
@@ -64,19 +73,20 @@ const char *difficult[3] = {
   " Medium ",
   " Hard " };
 
-// Input Pin Wemos
-  const int     AI1            = 35;      // IO26 - analog signal x joystick
-  const int     AI2            = 26;      // IO18 - analog signal y joystick
-  const int     switchPin      = 19;      // IO19
-/*   const int     SCLpin         = 22;      // IO18
-  const int     SDApin         = 21;      // IO18 */
 
-// Input Pin S3 mini
-  // const int     AI1           = 6;       // GP6 - analog signal x joystick
-  // const int     AI2           = 5;       // GP5 - analog signal y joystick
-  // const int     switchPin     = 4;       // GP4
-  // const int     SCLpin        = 1;       // GP1
-  // const int     SDApin        = 2;       // GP2
+#if (ESP32_MOD) // Input Pin Wroom
+  const int     AI1           = 35;   // IO26 - analog signal x joystick
+  const int     AI2           = 26;   // IO18 - analog signal y joystick
+  const int     switchPin     = 19;   // IO19
+  const int     SCLpin        = 22;   // IO21
+  const int     SDApin        = 21;   // IO21
+#else           // Input Pin S3 mini
+  const int     AI1           = 8;    // GP8 - analog signal x joystick
+  const int     AI2           = 9;    // GP9 - analog signal y joystick
+  const int     switchPin     = 7;    // GP7
+  const int     SCLpin        = 1;    // GP1
+  const int     SDApin        = 2;    // GP2
+#endif
 
 // global variables
 int           gameRate;               // time in ms between moves
@@ -110,14 +120,37 @@ double        score;
 
 #if (MULTIPLAY) // ----------- MULTIPLAYER -------------------------
   // BlueTooth variable
-  BluetoothSerial SerialBT; 
-  uint8_t slaveMACAddress[6] = {0x32, 0xAE, 0xA4, 0x07, 0x0D, 0x66}; // slave MAC address
-  uint8_t oldMACAddress[6];
+  #if (BT_CLASSIC)
+    BluetoothSerial SerialBT; 
+    uint8_t slaveMACAddress[6] = {0x32, 0xAE, 0xA4, 0x07, 0x0D, 0x66}; // slave MAC address
+    uint8_t oldMACAddress[6];
+  #else
+    #define SERVICE_UUID        "37859a32-9f35-4408-b4e8-ad61f9bc1f31"
+    #define CHARACTERISTIC_UUID "e21f0560-f548-4c6c-a189-81b2264e5485"
+
+    //static BLEUUID serviceUUID(SERVICE_UUID);
+    //static BLEUUID charUUID(CHARACTERISTIC_UUID);
+    static BLEUUID serviceUUID("37859a32-9f35-4408-b4e8-ad61f9bc1f31");     // DEBUG
+    static BLEUUID charUUID("e21f0560-f548-4c6c-a189-81b2264e5485");
+
+    // server
+    BLEServer         *pServer          = NULL;
+    BLECharacteristic *pCharacteristic  = NULL;
+    bool    deviceConnected     = false;
+    bool    oldDeviceConnected  = false;    
+    // client
+    static  BLERemoteCharacteristic *pRemoteCharacteristic;
+    static  BLEAdvertisedDevice     *myDevice;
+    static  boolean connected   = false;
+    // common
+    bool    notified;
+    double  received_value;
+  #endif
 
   // pong variables
-  #define     XV        80      // ball's horizontal velocity
+  #define     XV        70      // ball's horizontal velocity
   #define     MAX_XV    110     // ball's max horizontal velocity
-  double      max_t_v = 0.06;   // max pixels a tile can move per millisecond
+  double      max_t_v = 0.05;   // max pixels a tile can move per millisecond
   const int   tile_H  = 10;     // nr of pixels defining the tile height
   const int   tile_W  = 3;      // nr of pixels defining the tile width
   const int   bord_W  = 3;      // border width
@@ -151,7 +184,6 @@ int     entered  = -1;
 
 // Task handles for parallel programming
 TaskHandle_t handle_snake_joy_read;
-//TaskHandle_t handle_pong_joy_read;
 
 // functions
 void starting_animation ();
@@ -178,20 +210,24 @@ void target_game        ();
 #if (MULTIPLAY) // -------------- MULTIPLAYER GAMES ----------
 void pong_game          ();
   bool initialize_BT    ();                 // starts BT in master/slave mode and pair the devices
+#if (!BT_CLASSIC)
+  bool connectToServer  ();                 // used by slave to connect to server
+#endif
   void pong_printfield  ();                 // prints the two tiles, the ball and the score 
 #endif // ----------------------------------------------------
 
 
 void setup() {
   Serial.begin(115200);
+  Serial.printf("\nInitiate 201\n");
 
   pinMode(switchPin, INPUT_PULLUP);
+
+  Wire.begin(SDApin, SCLpin); // define the pins for I2C (SDA, SCL)
 
   attachInterrupt(digitalPinToInterrupt(switchPin), sw_activity, CHANGE);
   t_release = millis();
   t_press   = millis();
-
-  //Wire.begin(SCLpin, SDApin); // define the pins for I2C (SCL,SDA)
 
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3D for 128x64
@@ -202,13 +238,20 @@ void setup() {
   // starting animation "GAIM BOY"
   starting_animation();
 
-  delay(100);
+  delay(500);
   display.clearDisplay();
 
+  display.setTextColor(1); display.setTextSize(1);
+  display.setCursor(5, 20); display.print("At any moment press");
+  display.setCursor(5, 29); display.print("the switch for ~1 s");
+  display.setCursor(5, 38); display.print(" to return to menu");
+  display.display();
+
+  delay(100);
+
   // display "press button":
-  while (sw_press) {
+  while (sw_press)
     delay(1);
-  }
 
   // Milliseconds at which switch is pressed defines random seed
   randomSeed(millis()%1000);
@@ -231,7 +274,6 @@ void loop() {
   else if (selected == 2) {
     target_game();
   }
-
 #if (MULTIPLAY) // ----------- MULTIPLAYER ---------
   else if (selected == 3) {
     pong_game();
@@ -594,9 +636,6 @@ void move(int drct) {
   for (int k = 0; k < length; k++) {
     if (newX == position[k].x && newY == position[k].y) {
       alive = false;
-      Serial.print("---------------------------------------------------\n");
-      Serial.print("            Died\n");
-      Serial.print("---------------------------------------------------\n");
     }
   }
 
@@ -789,7 +828,7 @@ void pool_aim() {
     delay(1);
 
   // started pressing: 
-  while (sw_press) {
+  while (sw_press && alive) { // check
     readJoystick();
 
     if (abs(Xlin) > 0.1)
@@ -818,7 +857,7 @@ void pool_balls_anim() {
   b_vel[2].x = 0; b_vel[2].y = 0;
   b_vel[3].x = 0; b_vel[3].y = 0;
 
-  while (true) {
+  while (alive) {
     // simulation proceedure: integration of accelerations and velocities to define new position
     t = millis();
     display.fillRect(hole_R+1, hole_R+1, SCREEN_WIDTH-2*hole_R-1, SCREEN_HEIGHT-2*hole_R-1, 0);
@@ -1111,6 +1150,112 @@ void target_game() {
 #if (MULTIPLAY) // --------------- MULTIPLAYER GAMES ---------------
 
 /*---------------------
+  |   BLE functions   |
+  --------------------- */
+  #if (!BT_CLASSIC)
+    // BLE server class
+    class MyServerCallbacks : public BLEServerCallbacks {
+      void onConnect(BLEServer *pServer) {
+        deviceConnected = true;
+      };
+
+      void onDisconnect(BLEServer *pServer) {
+        deviceConnected = false;
+      }
+    };
+
+    // BLE client class
+    class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
+      void onResult(BLEAdvertisedDevice advertisedDevice) {
+        Serial.print("BLE Advertised Device found: ");
+        Serial.println(advertisedDevice.toString().c_str());
+
+        // We have found a device, let us now see if it contains the service we are looking for.
+        if (advertisedDevice.haveServiceUUID() && advertisedDevice.isAdvertisingService(serviceUUID)) {
+
+          BLEDevice::getScan()->stop();
+          myDevice = new BLEAdvertisedDevice(advertisedDevice);
+        }  // Found our server
+      }  
+    };  
+
+    class MyClientCallback : public BLEClientCallbacks {
+      void onConnect(BLEClient *pclient) {
+        Serial.printf("Connecting to server\n");
+      }
+
+      void onDisconnect(BLEClient *pclient) {
+        connected = false;
+        Serial.println("Disconnecting");
+      }
+    };
+
+    // Callback class to handle writes from the client
+    class MyCallbacks : public BLECharacteristicCallbacks {
+      void onWrite(BLECharacteristic *pCharacteristic) {
+        String value = pCharacteristic->getValue();
+        
+        received_value = value.toFloat()/10.0;
+        notified = true;
+      }
+    };
+
+    // Callback class to handle writes from the server
+    static void notifyCallback(BLERemoteCharacteristic *pBLERemoteCharacteristic, uint8_t *pData, size_t length, bool isNotify) {
+      uint32_t int_in = pData[0];
+      for (int i = 1; i < length; i++)
+        int_in = int_in | (pData[i] << i*8);
+
+      received_value = (double)int_in / 10.0;
+      notified = true;
+    }
+
+  bool connectToServer() {
+    Serial.print("Forming a connection to ");
+    Serial.println(myDevice->getAddress().toString().c_str());
+
+    BLEClient *pClient = BLEDevice::createClient();
+    Serial.println(" - Created client");
+
+    pClient->setClientCallbacks(new MyClientCallback());
+
+    // Connect to the remove BLE Server.
+    pClient->connect(myDevice);  // if you pass BLEAdvertisedDevice instead of address, it will be recognized type of peer device address (public or private)
+    Serial.println(" - Connected to server");
+    pClient->setMTU(517);  //set client to request maximum MTU from server (default is 23 otherwise)
+
+    // Obtain a reference to the service we are after in the remote BLE server.
+    BLERemoteService *pRemoteService = pClient->getService(serviceUUID);
+    if (pRemoteService == nullptr) {
+      Serial.print("Failed to find our service UUID: ");
+      Serial.println(serviceUUID.toString().c_str());
+      pClient->disconnect();
+      return false;
+    }
+    Serial.println(" - Found our service");
+
+    // Obtain a reference to the characteristic in the service of the remote BLE server.
+    pRemoteCharacteristic = pRemoteService->getCharacteristic(charUUID);
+    if (pRemoteCharacteristic == nullptr) {
+      Serial.print("Failed to find our characteristic UUID: ");
+      Serial.println(charUUID.toString().c_str());
+      pClient->disconnect();
+      return false;
+    }
+    Serial.println(" - Found our characteristic");
+
+    if (pRemoteCharacteristic->canNotify()) {
+      pRemoteCharacteristic->registerForNotify(notifyCallback);
+    }
+
+    connected = true;
+    return true;
+  }
+
+#endif
+
+
+/*---------------------
   |       PONG        |
   --------------------- */
 void pong_game() {
@@ -1124,12 +1269,15 @@ void pong_game() {
   // delay some time 
   delay(500);
 
+  Serial.printf("\n\n--------------------------\n\n");  // DEBUG
+
   // select between master and slave
   selected  = 1;
+  gotomenu  = false;
   mnpress   = false;
   display.setTextSize(1);
   display.setCursor(8, 30); display.println(F("Bluetooth pairing"));
-  while (true) {
+  while (!gotomenu) {
     readJoystick();
     calculate_dir();
 
@@ -1154,16 +1302,16 @@ void pong_game() {
       if (selected == 1) {
         display.setTextColor(SSD1306_WHITE); display.print(" ");
         display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        display.println(" Master ");
+        display.println(" Player 1 ");
         display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
-        display.print("  Slave  ");
+        display.print("  Player 2  ");
       }
       else {
         display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
-        display.println("  Master ");
+        display.println("  Player 1 ");
         display.print(" ");
         display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-        display.print(" Slave  ");
+        display.print(" Player 2  ");
       }
     }
 
@@ -1171,6 +1319,11 @@ void pong_game() {
     delay(t_sample_menu);
   }
   display.setTextColor(SSD1306_WHITE);
+
+  if (gotomenu) {  // safe exit
+    Serial.printf("Returning to menu");
+    return;
+  }
 
   // pair bluetooths
   if(initialize_BT()) {       // succesfull pairing
@@ -1183,7 +1336,16 @@ void pong_game() {
     
     alive = true;
   } else {                    // could not initiate bluetooth communication
-    SerialBT.disconnect();  
+  
+#if (BT_CLASSIC)  /* -------------- BT CLASSIC --------------- */
+    SerialBT.disconnect();
+#else             /* ----------------- BLE ------------------- */
+    if (is_master) {
+      BLEDevice::getAdvertising()->stop();
+    }
+
+    BLEDevice::deinit();
+#endif            /* ---------------- END BT ----------------- */
 
     display.clearDisplay();
     display.setCursor(10, 25); display.println(F(" Failed to connect"));
@@ -1195,10 +1357,12 @@ void pong_game() {
 
     alive = false;
     gotomenu = true;
+    ESP.restart();
   }
 
   // Game initialization
   double frRate = 30;          // milliseconds per frame
+
   score_1 = 0; score_2 = 0;  
   scored = true;
 
@@ -1208,7 +1372,18 @@ void pong_game() {
   pr_y1 = t_y1;
   pr_y2 = t_y2;
 
+#if (BT_CLASSIC)  /* -------------- BT CLASSIC --------------- */
   SerialBT.println(t_y1);       // sends tile position
+#else             /* ----------------- BLE ------------------- */
+ int int_out = (t_y1*10.0);
+
+  if (is_master) {
+    pCharacteristic->setValue((uint8_t *)&int_out, 4);
+    pCharacteristic->notify();
+  } else {
+    pRemoteCharacteristic->writeValue(String(int_out));
+  }
+#endif            /* ---------------- END BT ----------------- */
 
   // initial ball position
   ball_xy.x = SCREEN_WIDTH/2;
@@ -1217,7 +1392,7 @@ void pong_game() {
   pr_ball_xy.y = ball_xy.y;
 
   // initial ball velocity
-  ball_v.y = random(-XV, XV);   // y v is calculated randomicly
+  ball_v.y = 0.7*random(-XV, XV);   // y v is calculated randomicly
   if (is_master) {
     play_receive = true;        // master starts
     ball_v.x = -XV;             // initial ball velocity
@@ -1233,14 +1408,11 @@ void pong_game() {
   display.drawFastVLine(SCREEN_WIDTH-1, v_bound, SCREEN_HEIGHT-v_bound, 1);
   pong_printfield();
 
-  Serial.printf("\n\n--------------------------------\n--------------------------------\n\n", t_y2);  // DEBUG
-
   // Game loop
   while (alive) {
-    t = millis();
-
     // BT communication: only the tile position is communicated. Every device calculates the game by itself      
     // syncronization is essential
+#if (BT_CLASSIC)  /* -------------- BT CLASSIC --------------- */
     while (alive) {                         // waits until opponents tile position is received via BT
       delayMicroseconds(100);
       Serial.print("-");
@@ -1251,6 +1423,22 @@ void pong_game() {
 
     pr_y2 = t_y2;                           // saves previous tile position
     t_y2 = (SerialBT.readStringUntil(' ')).toFloat();
+#else             /* ----------------- BLE ------------------ */
+    while (alive) {                         // waits until opponents tile position is received via BT
+      delayMicroseconds(100);
+      Serial.print("-");
+      if (notified)
+        break;
+    }
+    Serial.print("BLE\n");
+
+    pr_y2 = t_y2;                           // saves previous tile position
+    t_y2 = received_value;
+    notified = false;
+    Serial.printf("tile sent %.1f tile received %.1f\n", t_y1, t_y2);
+#endif            /* ---------------- END BT ----------------- */
+
+    t = millis(); // start the frame rate counter
 
     // read analog input
     Yval = analogRead(AI2);                 // read the y axis of the joystick
@@ -1264,12 +1452,28 @@ void pong_game() {
       t_y1 += max_t_v*frRate*Ylin;          // increment the tile position
     }
 
+#if (!BT_CLASSIC) // for BLE tile pos is rounded to 2nd decimal place
+    t_y1 = ROUND_TO_1_DECIMALS(t_y1);
+#endif // -----------------------------------------------------------
+
     if (t_y1 < v_bound + tile_H/2 + 1)      // check if the tile is not over the border
       t_y1 = v_bound + tile_H/2 + 1;
     else if (t_y1 > SCREEN_HEIGHT - tile_H/2 - 2)
       t_y1 = SCREEN_HEIGHT - tile_H/2 - 2;
     
-    SerialBT.printf("%f ", t_y1);           // sends tile position giving a lot of time to the message to be sent
+    // Tile position communication 
+#if (BT_CLASSIC)  /* -------------- BT CLASSIC --------------- */
+      SerialBT.printf("%f ", t_y1);           // sends tile position giving a lot of time to the message to be sent
+#else             /* ----------------- BLE ------------------- */
+      int int_out = (t_y1*10.0);
+
+      if (is_master) {
+        pCharacteristic->setValue((uint8_t *)&int_out, 4);
+        pCharacteristic->notify();
+      } else {
+        pRemoteCharacteristic->writeValue(String(int_out));
+      }
+#endif            /* ---------------- END BT  ---------------- */
 
     pr_ball_xy.x = ball_xy.x;               // saves the current ball position 
     pr_ball_xy.y = ball_xy.y;
@@ -1294,11 +1498,10 @@ void pong_game() {
         ball_v.x *= -1.0;
 
         // calculate new vertical velocity
-        ball_v.y += Dt_y1*150.0/frRate;
+        ball_v.y += Dt_y1*180.0/frRate;
 
-        if (fabs(ball_v.y) > MAX_XV) {
+        if (fabs(ball_v.y) > MAX_XV)
           ball_v.y = ball_v.y > 0 ? MAX_XV : -MAX_XV; 
-        }
       }
       else {  // opponent scored
         scored = true;
@@ -1312,7 +1515,7 @@ void pong_game() {
         ball_v.x *= -1.0;
 
         // calculate new vertical velocity
-        ball_v.y += (t_y2-pr_y2)*150.0/frRate;
+        ball_v.y += (t_y2-pr_y2)*180.0/frRate;
 
         if (fabs(ball_v.y) > MAX_XV) {
           ball_v.y = ball_v.y > 0 ? MAX_XV : -MAX_XV; 
@@ -1357,9 +1560,9 @@ void pong_game() {
         t_y1 = (SCREEN_HEIGHT+v_bound)/2.0;
         t_y2 = (SCREEN_HEIGHT+v_bound)/2.0;
 
-        delay(1000);
-
+        delay(1000); // check
         pong_printfield();
+        delay(1000);
 
         if (play_receive) {
           ball_v.x = -XV;             // initial ball velocity
@@ -1367,7 +1570,7 @@ void pong_game() {
           ball_v.x =  XV;
         }
         
-        ball_v.y = random(-XV, XV);   // y v is calculated randomicly
+        ball_v.y = 0.7*random(-XV, XV);   // y v is calculated randomicly
 
         scored = false;
       }
@@ -1380,74 +1583,197 @@ void pong_game() {
     Serial.println("done"); // DEBUG
   }
 
-  // at the moment I have no better alternative to reset the BT comm than to restart the devices
-  // I should fix this but only if I continue to use BT classic. But I think I will be using BLE because
-  // it is the only one supported for ESP32 S3 mini, which I want to use for its very compact form
+  // at the moment I have no better alternative to reset the BT classic comm than to restart the devices
+  // I should fix this
+#if (BT_CLASSIC)    /* -------------- BT CLASSIC --------------- */
   SerialBT.end();
   ESP.restart();
+#else               /* ----------------- BLE ------------------- */
+  if (is_master)
+    BLEDevice::getAdvertising()->stop();
+
+  BLEDevice::deinit();
+#endif              /* ---------------- END BT ----------------- */
+
   return;
 }
 
-bool initialize_BT() {
-  bool success_pairing = false;
-  int new_seed;
-  display.clearDisplay();
-  display.setCursor(12, 10); display.println(F("Bluetooth pairing"));
+#if (BT_CLASSIC)  /* -------------- BT CLASSIC --------------- */
+  bool initialize_BT() {
+    bool success_pairing = false;
+    int new_seed;
+    display.clearDisplay();
+    display.setCursor(12, 10); display.println(F("Bluetooth pairing"));
 
-  if (is_master) {
-    // Start Bluetooth in master mode
-    SerialBT.begin("ESP32_Master", true);  // true enables master mode
-    SerialBT.deleteAllBondedDevices();
+    if (is_master) {
+      // Start Bluetooth in master mode
+      SerialBT.begin("ESP32_Master", true);  // true enables master mode
+      SerialBT.deleteAllBondedDevices();
 
-    display.setCursor(14, 35); display.println(F("Press when slave")); 
-    display.setCursor(14, 43); display.println(F("is ready to pair")); 
-    display.display();
+      display.setCursor(2, 35); display.println(F("Press when player 2")); 
+      display.setCursor(14, 43); display.println(F("is ready to pair")); 
+      display.display();
 
-    while (sw_press)
-      delay(1);
-    
-    if (SerialBT.connect(slaveMACAddress)) {  // connect to the server
-      Serial.println("Connected to Server!");
-      success_pairing = true;
-
-      new_seed = random(1000);
-      SerialBT.println(new_seed);             // send new seed to slave, the game can start
-      randomSeed(new_seed);
-
-      delay(1200);
-    } else {
-      Serial.println("Failed to connect to Server.");
-      success_pairing = false;
-    }
-  }
-  else {  
-    slaveMACAddress[5] -= 2;
-    esp_base_mac_addr_set(&slaveMACAddress[0]);
-    slaveMACAddress[5] += 2;
-
-    display.setCursor(24, 39); display.println(F("Ready to pair")); 
-    display.display();
-
-    SerialBT.begin("ESP32_Slave", false);  // start bluetooth in slave mode
-    Serial.println("Bluetooth Server Started. Waiting for clients...");
-
-    alive = true;
-    while (alive) {
-      if (SerialBT.available()) {
-        delay(200);
-        new_seed = (SerialBT.readString()).toInt();
-        Serial.printf("new seed is %i", new_seed);
-        randomSeed(new_seed);
+      while (sw_press)
+        delay(1);
+      
+      if (SerialBT.connect(slaveMACAddress)) {  // connect to the server
+        Serial.println("Connected to Server!");
         success_pairing = true;
 
-        break;
-      }
-      delay(1);
-    }
-  }
+        new_seed = random(1000);
+        SerialBT.println(new_seed);             // send new seed to slave, the game can start
+        randomSeed(new_seed);
 
-  return success_pairing;
-}
+        delay(1200);
+      } else {
+        Serial.println("Failed to connect to Server.");
+        success_pairing = false;
+      }
+    }
+    else {  
+      slaveMACAddress[5] -= 2;
+      esp_base_mac_addr_set(&slaveMACAddress[0]);
+      slaveMACAddress[5] += 2;
+
+      display.setCursor(24, 39); display.println(F("Ready to pair")); 
+      display.display();
+
+      SerialBT.begin("ESP32_Slave", false);  // start bluetooth in slave mode
+      Serial.println("Bluetooth Server Started. Waiting for clients...");
+
+      alive = true;
+      while (alive) {
+        if (SerialBT.available()) {
+          delay(200);
+          new_seed = (SerialBT.readString()).toInt();
+          Serial.printf("new seed is %i", new_seed);
+          randomSeed(new_seed);
+          success_pairing = true;
+
+          break;
+        }
+        delay(1);
+      }
+    }
+
+    return success_pairing;
+  }
+#else   /* -------------- BLE --------------- */
+  bool initialize_BT() {
+    bool success_pairing = false;
+    int new_seed;
+    display.clearDisplay();
+    display.setCursor(12, 10); display.println(F("Bluetooth pairing"));
+
+    if (is_master) {
+      Serial.printf("Initializing BLE server\n");
+       // Create the BLE Device
+      BLEDevice::init("ESP32");
+
+      // Create the BLE Server
+      pServer = BLEDevice::createServer();
+      pServer->setCallbacks(new MyServerCallbacks());
+
+      // Create the BLE Service
+      BLEService *pService = pServer->createService(SERVICE_UUID);
+
+      // Create a BLE Characteristic
+      pCharacteristic = pService->createCharacteristic( 
+                          CHARACTERISTIC_UUID,
+                          BLECharacteristic::PROPERTY_READ    | 
+                          BLECharacteristic::PROPERTY_WRITE   | 
+                          BLECharacteristic::PROPERTY_NOTIFY  | 
+                          BLECharacteristic::PROPERTY_INDICATE
+      );
+
+      // Set the callback to handle writes
+      pCharacteristic->setCallbacks(new MyCallbacks());
+
+      // Start the service
+      pService->start();
+
+      // Start advertising
+      BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+      pAdvertising->addServiceUUID(SERVICE_UUID);
+      pAdvertising->setScanResponse(false);
+      pAdvertising->setMinPreferred(0x0);  // set value to 0x00 to not advertise this parameter
+      BLEDevice::startAdvertising();
+      Serial.println("Waiting a client connection to notify...");
+      pCharacteristic->notify();
+
+      display.setCursor(8, 35); display.println(F("Waiting for player")); 
+      display.setCursor(8, 45); display.println(F("   2 to connect")); 
+      display.display();
+
+      notified = false;
+      alive = true;
+
+      while (!deviceConnected && alive)
+        delay(1);
+      success_pairing = deviceConnected;
+
+      if (success_pairing) {
+        Serial.printf("Client successfully connected to server\n");
+
+        new_seed = random(1000);
+
+        delay(1000);
+      
+        int send_seed = new_seed*10;
+        pCharacteristic->setValue((uint8_t *)&send_seed, 4);
+        pCharacteristic->notify();
+
+        randomSeed(new_seed);
+        Serial.printf("new seed = %i\n", new_seed);
+
+        delay(30);
+      } 
+    }
+    else {
+      Serial.printf("Initializing BLE client\n");
+      BLEDevice::init("");
+
+      BLEScan *pBLEScan = BLEDevice::getScan();
+      pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+      pBLEScan->setInterval(1349);
+      pBLEScan->setWindow(449);
+      pBLEScan->setActiveScan(true);
+      pBLEScan->start(5, false);
+      
+      notified = false;
+
+      display.setCursor(8, 35); display.println(F("Press when player 1")); 
+      display.setCursor(14, 45); display.println(F("is ready to pair")); 
+      display.display();
+
+      while (sw_press)
+        delay(1);
+
+      if (connectToServer()) {
+        success_pairing = true;
+        Serial.println("We are now connected to the BLE Server.");
+
+        while (!notified) { // waits for sincronization
+          Serial.printf("-");   
+          delay(1);
+        } 
+        Serial.printf("\n");   
+
+        new_seed = received_value;
+        notified = false;
+        randomSeed(new_seed);
+        Serial.printf("new seed = %i\n", new_seed);
+      } else {
+        success_pairing = false;
+        Serial.println("We have failed to connect to the server");
+      }
+    }
+
+    return success_pairing;
+  }
+#endif /* -------------- END BT --------------- */
+
 
 void pong_printfield() {
   // draw score if scored
