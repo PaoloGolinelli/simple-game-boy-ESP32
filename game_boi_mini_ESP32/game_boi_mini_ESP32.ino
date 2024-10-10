@@ -84,8 +84,8 @@ const char *difficult[3] = {
   const int     AI1           = 8;    // GP8 - analog signal x joystick
   const int     AI2           = 9;    // GP9 - analog signal y joystick
   const int     switchPin     = 7;    // GP7
-  const int     SCLpin        = 1;    // GP1
-  const int     SDApin        = 2;    // GP2
+  const int     SCLpin        = 2;    // GP1
+  const int     SDApin        = 1;    // GP2
 #endif
 
 // global variables
@@ -1361,7 +1361,7 @@ void pong_game() {
   }
 
   // Game initialization
-  double frRate = 30;          // milliseconds per frame
+  double frRate = 60;          // milliseconds per frame
 
   score_1 = 0; score_2 = 0;  
   scored = true;
