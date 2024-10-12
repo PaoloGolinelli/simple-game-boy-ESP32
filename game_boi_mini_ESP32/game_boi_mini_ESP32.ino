@@ -73,7 +73,6 @@ const char *difficult[3] = {
   " Medium ",
   " Hard " };
 
-
 #if (ESP32_MOD) // Input Pin Wroom
   const int     AI1           = 35;   // IO26 - analog signal x joystick
   const int     AI2           = 26;   // IO18 - analog signal y joystick
@@ -219,7 +218,7 @@ void pong_game          ();
 
 void setup() {
   Serial.begin(115200);
-  Serial.printf("\nInitiate 201\n");
+  Serial.printf("\nInitiate adjustment\n");
 
   pinMode(switchPin, INPUT_PULLUP);
 
@@ -1361,7 +1360,7 @@ void pong_game() {
   }
 
   // Game initialization
-  double frRate = 60;          // milliseconds per frame
+  double frRate = 52;          // milliseconds per frame
 
   score_1 = 0; score_2 = 0;  
   scored = true;
@@ -1408,6 +1407,8 @@ void pong_game() {
   display.drawFastVLine(SCREEN_WIDTH-1, v_bound, SCREEN_HEIGHT-v_bound, 1);
   pong_printfield();
 
+  Serial.print("\n\n");
+
   // Game loop
   while (alive) {
     // BT communication: only the tile position is communicated. Every device calculates the game by itself      
@@ -1447,7 +1448,7 @@ void pong_game() {
     Dt_y1 = t_y1 - pr_y1;                   // stores in a variable the previous tile difference
     pr_y1 = t_y1;                           // saves previous tile position
 
-    if (fabs(Ylin) > 0.04) {                // noise cancellation
+    if (fabs(Ylin) > 0.12) {                // noise cancellation
       Ylin = SIGN(Ylin)*pow(fabs(Ylin), 1.0/3.0); // increase sensibility for lower values
       t_y1 += max_t_v*frRate*Ylin;          // increment the tile position
     }
@@ -1465,12 +1466,13 @@ void pong_game() {
 #if (BT_CLASSIC)  /* -------------- BT CLASSIC --------------- */
       SerialBT.printf("%f ", t_y1);           // sends tile position giving a lot of time to the message to be sent
 #else             /* ----------------- BLE ------------------- */
-      int int_out = (t_y1*10.0);
 
       if (is_master) {
+        int int_out = (pr_y1*10.0);
         pCharacteristic->setValue((uint8_t *)&int_out, 4);
         pCharacteristic->notify();
       } else {
+        int int_out = (t_y1*10.0);
         pRemoteCharacteristic->writeValue(String(int_out));
       }
 #endif            /* ---------------- END BT  ---------------- */
@@ -1726,8 +1728,6 @@ void pong_game() {
 
         randomSeed(new_seed);
         Serial.printf("new seed = %i\n", new_seed);
-
-        delay(30);
       } 
     }
     else {
