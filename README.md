@@ -20,10 +20,12 @@ In this repository you can find all the material required to build a DIY console
     - WROOM D1 mini: https://app.cirkitdesigner.com/project/fdfa9b3a-22b1-4d85-bbf5-8aa331098814
 
 - stl file for 3D printing the case and positioning of the components
-    - Assembly
-    - top cover
-    - lower cover
-    - joystick cover
+    - game_boy_assembly
+    - top_cover
+    - bottom_cover
+    - joystick_head
+    - joystick_lid
+    - assembly_3Dprint_gcode_cura: CURA project with assembly, although you may configure it to your 3D printer settings
 
 ## Components required to make your own
 - ESP32 S3 MINI Zero (or WROOM D1 mini)
@@ -38,7 +40,8 @@ In this repository you can find all the material required to build a DIY console
 - 9V battery
 - step down voltage regulator: DD4012SA 5V
 
-### Instructions 
+### Building Instructions 
+
 
 ## Required tools
 - filament 3D printer
